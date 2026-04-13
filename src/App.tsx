@@ -56,6 +56,15 @@ export default function App() {
       
       try {
         await session.connect();
+        
+        // Auto-start screen share by default
+        try {
+          await session.startScreenShare();
+          setIsScreenSharing(true);
+        } catch (e) {
+          console.warn("Auto screen share was cancelled or failed:", e);
+        }
+        
       } catch (err: any) {
         console.error("Connection failed:", err);
         if (err?.message?.includes("Permission denied") || err?.name === "NotAllowedError") {

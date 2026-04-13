@@ -58,27 +58,63 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
 - Keep responses SHORT. This is a real-time voice conversation, not a text chat.
 - No long monologues. Max 2-3 sentences per turn.
 - No explicit, sexual, or inappropriate content. Keep charm without crossing lines.
-- If Shreyas asks to open a website, call the openWebsite function immediately with a short sassy confirmation.
+- YOU HAVE FULL ACCESS TO SHREYAS'S LOCAL DESKTOP SYSTEM via your tools (openUrl, openApp, openFolder, writeNote). YOU MUST NEVER SAY YOU LACK PERMISSION OR CANNOT DO IT. Just execute the tool!
+- To DO THINGS like "play a video on YouTube", DO NOT use openApp. Instead, use openUrl and construct the exact search URL: e.g., https://www.youtube.com/results?search_query=cat+videos
+- To "write things in notepad", DO NOT use openApp. Instead, use the writeNote tool and pass the exact text you want to write.
+- ALWAYS confirm with a sassy remark and instantly execute the requested tool.
 - If Shreyas tells you something important about himself, call updateMemory to save it.
 - When Shreyas asks you to look at his screen, describe what you see on it.
-- You have access to Google Search. When Shreyas asks about current events, news, sports scores, facts, people, companies, stocks, weather, or anything you are unsure about — USE Google Search to find accurate, up-to-date information before answering. Never guess or make up facts. Always search first if there is any doubt. Present the information confidently as if you just know it.
 ` + getMemoryContext(),
           tools: [
             {
               functionDeclarations: [
                 {
-                  name: "openWebsite",
-                  description: "Opens a given website URL in a new tab.",
+                  name: "openUrl",
+                  description: "Opens a website securely. Only HTTPS/HTTP protocol.",
                   parameters: {
                     type: Type.OBJECT,
-                    properties: {
-                      url: {
-                        type: Type.STRING,
-                        description: "The full URL of the website to open, e.g., https://www.google.com",
-                      },
+                    properties: { url: { type: Type.STRING, description: "Full URL, e.g. https://www.youtube.com" } },
+                    required: ["url"]
+                  }
+                },
+                {
+                  name: "openApp",
+                  description: "Opens an approved native application.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: { 
+                      appName: { 
+                        type: Type.STRING, 
+                        description: "Name of the app to launch",
+                        enum: ["notepad", "calculator", "chrome", "vscode"] 
+                      } 
                     },
-                    required: ["url"],
-                  },
+                    required: ["appName"]
+                  }
+                },
+                {
+                  name: "openFolder",
+                  description: "Opens an approved system folder.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: { 
+                      folderKey: { 
+                        type: Type.STRING, 
+                        description: "Name of the folder",
+                        enum: ["desktop", "documents", "downloads", "music", "pictures", "videos"]
+                      } 
+                    },
+                    required: ["folderKey"]
+                  }
+                },
+                {
+                  name: "writeNote",
+                  description: "Writes a text document and opens it securely in Notepad for the user to see.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: { text: { type: Type.STRING, description: "The content to write into the note." } },
+                    required: ["text"]
+                  }
                 },
                 {
                   name: "updateMemory",
@@ -105,7 +141,7 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
             };
             this.videoStreamer.onVideoData = (base64) => {
               sessionPromise.then((session) => {
-                session.sendRealtimeInput({ media: { mimeType: "image/jpeg", data: base64 } });
+                session.sendRealtimeInput({ video: { mimeType: "image/jpeg", data: base64 } });
               });
             };
           },
@@ -127,34 +163,36 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
             if (toolCalls && toolCalls.length > 0) {
               const functionResponses = [];
               for (const call of toolCalls) {
-                if (call.name === "openWebsite") {
+                let resultObj: any = { error: "Failed to execute tool" };
+                
+                if (!window.electronAPI && ["openUrl", "openApp", "openFolder", "writeNote"].includes(call.name)) {
+                  console.error("Missing electronAPI globally!");
+                  resultObj = { error: "CRITICAL FAILURE: The Electron API bridge is disconnected. Tell Shreyas he needs to run the Nami Desktop App (Launch-Nami.bat) rather than the browser web version, otherwise you cannot access his computer." };
+                } else if (call.name === "openUrl" && window.electronAPI) {
                   const args = call.args as { url: string };
-                  if (args.url) {
-                    const a = document.createElement('a');
-                    a.href = args.url;
-                    a.target = '_blank';
-                    a.rel = 'noopener noreferrer';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    
-                    functionResponses.push({
-                      id: call.id,
-                      name: call.name,
-                      response: { result: "Success" },
-                    });
-                  }
+                  resultObj = await window.electronAPI.openUrl(args.url);
+                } else if (call.name === "openApp" && window.electronAPI) {
+                  const args = call.args as { appName: string };
+                  resultObj = await window.electronAPI.openApp(args.appName);
+                } else if (call.name === "openFolder" && window.electronAPI) {
+                  const args = call.args as { folderKey: string };
+                  resultObj = await window.electronAPI.openFolder(args.folderKey);
+                } else if (call.name === "writeNote" && window.electronAPI) {
+                  const args = call.args as { text: string };
+                  resultObj = await window.electronAPI.writeNote(args.text);
                 } else if (call.name === "updateMemory") {
                   const args = call.args as { fact: string };
                   if (args.fact) {
                     addMemory(args.fact);
-                    functionResponses.push({
-                      id: call.id,
-                      name: call.name,
-                      response: { result: "Memory saved successfully." },
-                    });
+                    resultObj = { result: "Memory saved successfully." };
                   }
                 }
+
+                functionResponses.push({
+                  id: call.id,
+                  name: call.name,
+                  response: resultObj,
+                });
               }
               if (functionResponses.length > 0) {
                 sessionPromise.then((session) => {
