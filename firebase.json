@@ -1,0 +1,10 @@
+{
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Nami AI Companion",
+        "supportEmail": "shreyasmugargol@gmail.com"
+      }
+    }
+  }
+}

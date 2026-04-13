@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useRef } from "react";
-import { Mic, MicOff, Loader2, Radio, Brain, LogOut } from "lucide-react";
+import { Mic, MicOff, Loader2, Radio, Brain, LogOut, Send, Image as ImageIcon, MonitorUp, MonitorOff } from "lucide-react";
 import { motion } from "motion/react";
 import { LiveSession, SessionState } from "./lib/live";
 import { processComplexQuery } from "./lib/deepThought";
@@ -19,6 +19,9 @@ export default function App() {
   const [appMode, setAppMode] = useState<"live" | "deep">("live");
   const [state, setState] = useState<SessionState>("disconnected");
   const [deepState, setDeepState] = useState<"idle" | "recording" | "thinking" | "speaking">("idle");
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const sessionRef = useRef<LiveSession | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -64,6 +67,10 @@ export default function App() {
       }
     } else {
       if (sessionRef.current) {
+        if (isScreenSharing) {
+          sessionRef.current.stopScreenShare();
+          setIsScreenSharing(false);
+        }
         sessionRef.current.disconnect();
         sessionRef.current = null;
       }
@@ -130,6 +137,10 @@ export default function App() {
     
     // Cleanup live session
     if (sessionRef.current) {
+      if (isScreenSharing) {
+        sessionRef.current.stopScreenShare();
+        setIsScreenSharing(false);
+      }
       sessionRef.current.disconnect();
       sessionRef.current = null;
     }
@@ -144,6 +155,51 @@ export default function App() {
     setDeepState("idle");
     
     setAppMode(mode);
+  };
+
+  const handleSendChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || !sessionRef.current || state === "disconnected") return;
+    try {
+      await sessionRef.current.sendTextMessage(chatInput);
+      setChatInput("");
+    } catch (err) {
+      console.error("Failed to send text message", err);
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !sessionRef.current || state === "disconnected") return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const base64Url = event.target?.result as string;
+      const base64 = base64Url.split(',')[1];
+      try {
+        await sessionRef.current!.sendImage(base64, file.type);
+      } catch (err) {
+        console.error("Failed to send image", err);
+      }
+    };
+    reader.readAsDataURL(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const toggleScreenShare = async () => {
+    if (!sessionRef.current || state === "disconnected") return;
+    if (isScreenSharing) {
+      sessionRef.current.stopScreenShare();
+      setIsScreenSharing(false);
+    } else {
+      try {
+        await sessionRef.current.startScreenShare();
+        setIsScreenSharing(true);
+      } catch (err) {
+        console.error("Screen sharing failed or cancelled", err);
+        setIsScreenSharing(false);
+      }
+    }
   };
 
   if (!isAuthReady) {
@@ -262,8 +318,11 @@ export default function App() {
           </motion.p>
         </div>
 
-        {/* Central Button */}
-        <div className="relative flex items-center justify-center">
+        {/* Central Action Area */}
+        <div className="flex items-center justify-center">
+
+          {/* Central Button */}
+          <div className="relative flex items-center justify-center">
           {/* Pulse rings */}
           {(isLiveActive || isDeepActive) && (
             <>
@@ -312,6 +371,8 @@ export default function App() {
           </button>
         </div>
 
+        </div>
+
         {/* Waveform Visualization */}
         <div className="h-16 flex items-center justify-center gap-1">
           {[...Array(12)].map((_, i) => (
@@ -335,6 +396,60 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* Persistent Chat Input Bar */}
+      {appMode === "live" && state !== "disconnected" && state !== "connecting" && (
+        <motion.div 
+          initial={{ opacity: 0, y: 50 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="absolute bottom-8 left-1/2 -translate-x-1/2 w-full max-w-3xl px-6 z-30 flex items-center gap-3"
+        >
+          {/* Screen Share Button */}
+          <button
+            onClick={toggleScreenShare}
+            className={cn(
+              "p-3 rounded-xl transition-all duration-300 border backdrop-blur-md shadow-lg",
+              isScreenSharing ? "bg-green-500/20 border-green-500/50 text-green-400" : "bg-white/10 border-white/20 hover:bg-white/20 text-white/70 hover:text-white"
+            )}
+            title={isScreenSharing ? "Stop Screen Share" : "Share Screen with Nami"}
+          >
+            {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <MonitorUp className="w-5 h-5" />}
+          </button>
+
+          <form onSubmit={handleSendChat} className="flex-1 flex items-center gap-3 bg-white/10 backdrop-blur-xl border border-white/20 p-2 rounded-2xl shadow-2xl">
+            <input 
+              type="file" 
+              ref={fileInputRef}
+              onChange={handleImageUpload}
+              accept="image/*"
+              className="hidden" 
+            />
+            <button 
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="p-3 text-white/60 hover:text-white hover:bg-white/10 rounded-xl transition-colors"
+              title="Share Image"
+            >
+              <ImageIcon className="w-5 h-5" />
+            </button>
+            <input 
+              type="text" 
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Send Nami a link or message..."
+              className="flex-1 bg-transparent text-white placeholder-white/40 focus:outline-none px-2"
+            />
+            <button 
+              type="submit"
+              disabled={!chatInput.trim()}
+              className="p-3 bg-purple-500 hover:bg-purple-600 disabled:bg-purple-500/50 disabled:cursor-not-allowed text-white rounded-xl transition-colors"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </form>
+        </motion.div>
+      )}
+
     </div>
   );
 }
