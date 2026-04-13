@@ -1,0 +1,30 @@
+{
+  "entities": {
+    "Memory": {
+      "title": "Memory",
+      "description": "A fact or piece of information remembered about the user.",
+      "type": "object",
+      "properties": {
+        "fact": {
+          "type": "string",
+          "description": "The fact to remember."
+        },
+        "uid": {
+          "type": "string",
+          "description": "The user ID of the owner."
+        },
+        "createdAt": {
+          "type": "timestamp",
+          "description": "When the memory was created."
+        }
+      },
+      "required": ["fact", "uid", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/Memory" },
+      "description": "Memories belonging to a specific user."
+    }
+  }
+}
