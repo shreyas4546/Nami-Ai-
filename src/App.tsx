@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Mic, MicOff, Loader2, Radio, Brain, LogOut, Send, Image as ImageIcon, MonitorUp, MonitorOff } from "lucide-react";
 import { motion } from "motion/react";
 import { LiveSession, SessionState } from "./lib/live";
@@ -12,6 +12,14 @@ import { loadMemories } from "./lib/memory";
 import { auth, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { cn } from "./lib/utils";
+
+// Identity System
+import { useCameraStream } from "./hooks/useCameraStream";
+import { loadModels, detectAndIdentify, enrollPrimaryUser, isEnrolled, areModelsLoaded, type FaceDetectionResult } from "./lib/vision/faceRecognition";
+import { getSpeakerConfidence } from "./lib/voice/speakerRecognition";
+import { fuseIdentity, type FusionOutput, type ConfidenceLevel } from "./lib/identity/fusion";
+import { initializePrimaryUser } from "./lib/identity/userMemory";
+import { handleUnknownFace } from "./lib/identity/autoLearn";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -27,6 +35,26 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+
+  // ─── Identity System State ───────────────────────────────────
+  const { videoRef: cameraRef, stream: cameraStream, isReady: isCameraReady, error: cameraError } = useCameraStream();
+  const [identityConfidence, setIdentityConfidence] = useState<ConfidenceLevel>("NONE");
+  const [identityAllowed, setIdentityAllowed] = useState(false);
+  const [multiplePeople, setMultiplePeople] = useState(false);
+  const [modelsReady, setModelsReady] = useState(false);
+  const [enrolled, setEnrolled] = useState(false);
+  const [enrolling, setEnrolling] = useState(false);
+  const identityRef = useRef<FusionOutput | null>(null);
+
+  // Ensure webcam binds to the video element once the user logs in and it renders
+  useEffect(() => {
+    if (cameraRef.current && cameraStream) {
+      if (cameraRef.current.srcObject !== cameraStream) {
+        cameraRef.current.srcObject = cameraStream;
+        cameraRef.current.play().catch(e => console.warn("Auto-play blocked:", e));
+      }
+    }
+  }, [cameraStream, user]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -48,15 +76,101 @@ export default function App() {
     };
   }, []);
 
+  // ─── Load Face Recognition Models ─────────────────────────────
+  useEffect(() => {
+    loadModels()
+      .then(() => {
+        initializePrimaryUser(); // Migrate or init primary user memory
+        setModelsReady(true);
+        setEnrolled(isEnrolled());
+      })
+      .catch((err) => console.error("[Identity] Failed to load face models:", err));
+  }, []);
+
+  // ─── Auto-enroll on first boot when camera is ready ───────────
+  useEffect(() => {
+    if (!modelsReady || !isCameraReady || enrolled || enrolling) return;
+    if (!cameraRef.current) return;
+
+    // Auto-enroll: capture the first user's face as primary
+    setEnrolling(true);
+    console.log("[Identity] Auto-enrolling primary user...");
+    enrollPrimaryUser(cameraRef.current, 7)
+      .then((success) => {
+        if (success) {
+          setEnrolled(true);
+          console.log("[Identity] ✅ Primary user enrolled!");
+        } else {
+          console.warn("[Identity] Enrollment failed — will retry next session.");
+        }
+        setEnrolling(false);
+      })
+      .catch(() => setEnrolling(false));
+  }, [modelsReady, isCameraReady, enrolled, enrolling]);
+
+  // ─── Continuous Face Detection Loop (throttled ~500ms) ────────
+  useEffect(() => {
+    if (!modelsReady || !isCameraReady || !enrolled) return;
+    if (!cameraRef.current) return;
+
+    const video = cameraRef.current;
+    let running = true;
+
+    const detectLoop = async () => {
+      while (running) {
+        try {
+          const faceResult = await detectAndIdentify(video);
+          const voiceResult = await getSpeakerConfidence();
+
+          const fusion = fuseIdentity({
+            face: faceResult,
+            voice: voiceResult,
+          });
+
+          identityRef.current = fusion;
+          setIdentityConfidence(fusion.confidence);
+          setIdentityAllowed(fusion.allowSensitiveActions);
+          setMultiplePeople(fusion.multiplePeople);
+
+          // Auto-learn: Trigger Nami to ask for a name if an unknown face is looking
+          if (faceResult.detected && fusion.userRole === "UNKNOWN" && sessionRef.current) {
+            handleUnknownFace(sessionRef.current);
+          }
+        } catch (err) {
+          // Silently continue on transient detection errors
+        }
+
+        // Throttle to ~500ms
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    };
+
+    detectLoop();
+
+    return () => {
+      running = false;
+    };
+  }, [modelsReady, isCameraReady, enrolled]);
+
   const toggleSession = async () => {
     if (state === "disconnected") {
       const apiKey = process.env.GEMINI_API_KEY as string;
-      const session = new LiveSession(apiKey, setState);
+      const session = new LiveSession(apiKey, setState, identityRef);
       sessionRef.current = session;
       
       try {
         await session.connect();
         
+        // Auto-start webcam feed so Nami can see the user
+        try {
+          if (cameraRef.current) {
+            session.startWebcam(cameraRef.current);
+            console.log("[App] ✅ Webcam started for Nami's vision");
+          }
+        } catch (e) {
+          console.warn("[App] Webcam start failed:", e);
+        }
+
         // Auto-start screen share by default
         try {
           await session.startScreenShare();
@@ -258,6 +372,36 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center justify-center overflow-hidden relative">
+      {/* Webcam feed — small PIP preview in bottom-left */}
+      <video
+        ref={(el) => {
+          if (cameraRef) {
+            (cameraRef as any).current = el;
+          }
+          if (el && cameraStream && el.srcObject !== cameraStream) {
+            el.srcObject = cameraStream;
+            el.play().catch((e) => console.warn("PIP auto-play blocked", e));
+          }
+        }}
+        width={320}
+        height={240}
+        style={{
+          position: "fixed",
+          bottom: 16,
+          left: 16,
+          width: 100,
+          height: 75,
+          borderRadius: 12,
+          border: "2px solid rgba(255,255,255,0.15)",
+          objectFit: "cover",
+          zIndex: 9998,
+          opacity: 0.85,
+        }}
+        autoPlay
+        muted
+        playsInline
+      />
+
       {/* Header */}
       <div className="absolute top-6 right-6 z-20 flex items-center gap-4">
         <div className="flex items-center gap-3 bg-white/5 px-4 py-2 rounded-full border border-white/10 backdrop-blur-md">

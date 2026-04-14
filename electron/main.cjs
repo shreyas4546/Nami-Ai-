@@ -117,9 +117,9 @@ app.whenReady().then(() => {
     });
   });
 
-  // Automatically grant media permissions to avoid "NotAllowedError" loops
+  // Automatically grant ALL media permissions (camera, mic, screen) silently
   mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
-    const allowedPermissions = ['media', 'display-capture'];
+    const allowedPermissions = ['media', 'camera', 'microphone', 'display-capture', 'mediaKeySystem'];
     if (allowedPermissions.includes(permission)) {
       callback(true);
     } else {
@@ -128,7 +128,7 @@ app.whenReady().then(() => {
   });
 
   mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
-    const allowedPermissions = ['media', 'display-capture'];
+    const allowedPermissions = ['media', 'camera', 'microphone', 'display-capture', 'mediaKeySystem'];
     if (allowedPermissions.includes(permission)) {
       return true;
     }

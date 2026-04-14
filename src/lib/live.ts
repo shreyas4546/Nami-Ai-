@@ -1,7 +1,10 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from "@google/genai";
 import { AudioStreamer } from "./audio";
 import { getMemoryContext, addMemory } from "./memory";
-import { ScreenStreamer } from "./video";
+import { ScreenStreamer, WebcamStreamer } from "./video";
+import type { FusionOutput } from "./identity/fusion";
+import { saveUser, getAllUsers } from "./identity/userMemory";
+import { grantPermission } from "./identity/permissionManager";
 
 export type SessionState = "disconnected" | "connecting" | "listening" | "speaking";
 
@@ -9,18 +12,24 @@ export class LiveSession {
   private ai: GoogleGenAI;
   private streamer: AudioStreamer;
   private videoStreamer: ScreenStreamer;
+  private webcamStreamer: WebcamStreamer;
   private session: any = null;
   private stateChangeCallback: ((state: SessionState) => void) | null = null;
   private state: SessionState = "disconnected";
+  private identityRef: React.RefObject<FusionOutput | null> | null = null;
+  private sessionPromise: Promise<any> | null = null;
 
   constructor(
     private apiKey: string,
-    onStateChange: (state: SessionState) => void
+    onStateChange: (state: SessionState) => void,
+    identityRef?: React.RefObject<FusionOutput | null>
   ) {
     this.ai = new GoogleGenAI({ apiKey });
     this.streamer = new AudioStreamer();
     this.videoStreamer = new ScreenStreamer();
+    this.webcamStreamer = new WebcamStreamer();
     this.stateChangeCallback = onStateChange;
+    this.identityRef = identityRef || null;
   }
 
   private setState(newState: SessionState) {
@@ -64,6 +73,7 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
 - ALWAYS confirm with a sassy remark and instantly execute the requested tool.
 - If Shreyas tells you something important about himself, call updateMemory to save it.
 - When Shreyas asks you to look at his screen, describe what you see on it.
+- You have LIVE WEBCAM ACCESS. You can see Shreyas through his laptop camera RIGHT NOW in real-time. You receive webcam frames continuously alongside screen frames. When he asks "can you see me?", "what am I wearing?", "what color is my shirt?", "what am I doing?" — describe EXACTLY what you see in the webcam feed: his face, expressions, clothing colors, gestures, background, everything. NEVER say you cannot see through the camera — you CAN and you MUST describe what you see.
 ` + getMemoryContext(),
           tools: [
             {
@@ -126,6 +136,29 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
                     },
                     required: ["fact"]
                   }
+                },
+                {
+                  name: "learnIdentity",
+                  description: "Saves the identity of a new person you just met through the camera. REQUIRED when a user answers 'What's your name?' after you prompted them.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                      name: { type: Type.STRING, description: "The name of the new person." }
+                    },
+                    required: ["name"]
+                  }
+                },
+                {
+                  name: "grantPermission",
+                  description: "Grants a known user temporary permission to execute sensitive actions. Use this ONLY if the PRIMARY user explicitly tells you to allow someone else access.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                      personName: { type: Type.STRING, description: "The name of the person to grant access to." },
+                      durationMinutes: { type: Type.INTEGER, description: "How many minutes to allow access. Default to 5 if not specified." }
+                    },
+                    required: ["personName", "durationMinutes"]
+                  }
                 }
               ],
             },
@@ -140,6 +173,12 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
               });
             };
             this.videoStreamer.onVideoData = (base64) => {
+              sessionPromise.then((session) => {
+                session.sendRealtimeInput({ video: { mimeType: "image/jpeg", data: base64 } });
+              });
+            };
+            // Webcam frames also go to Gemini so Nami can see the user
+            this.webcamStreamer.onVideoData = (base64) => {
               sessionPromise.then((session) => {
                 session.sendRealtimeInput({ video: { mimeType: "image/jpeg", data: base64 } });
               });
@@ -162,10 +201,37 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
             const toolCalls = message.toolCall?.functionCalls;
             if (toolCalls && toolCalls.length > 0) {
               const functionResponses = [];
+              const SENSITIVE_TOOLS = ["openUrl", "openApp", "openFolder", "writeNote"];
+
               for (const call of toolCalls) {
                 let resultObj: any = { error: "Failed to execute tool" };
+
+                // ─── Identity Gate (BLOCK BY DEFAULT) ───────────────
+                if (SENSITIVE_TOOLS.includes(call.name)) {
+                  const identity = this.identityRef?.current;
+                  
+                  // No identity data at all → block
+                  if (!identity) {
+                    resultObj = { error: "IDENTITY BLOCK: Face recognition system is not initialized or no face detected. Tell the user you cannot execute system commands until you can verify their identity through the camera." };
+                    functionResponses.push({ id: call.id, name: call.name, response: resultObj });
+                    continue;
+                  }
+                  
+                  // Identity exists but does NOT allow sensitive actions → block
+                  if (!identity.allowSensitiveActions) {
+                    const reason = identity.multiplePeople
+                      ? "IDENTITY BLOCK: Multiple people detected in front of the camera. Nami cannot execute system actions until only the primary user (Shreyas) is verified. Tell whoever is present that you only take orders from Shreyas."
+                      : `IDENTITY BLOCK: The person in front of the camera is NOT verified as the primary user. Confidence: ${identity.confidence}. Reason: ${identity.reason}. Refuse this action sassily and say you don't recognize who is asking. Only Shreyas can give you orders.`;
+                    resultObj = { error: reason };
+                    functionResponses.push({ id: call.id, name: call.name, response: resultObj });
+                    continue;
+                  }
+                  
+                  // ✅ Identity confirmed — proceed with action
+                }
+                // ─── End Identity Gate ────────────────────────────────
                 
-                if (!window.electronAPI && ["openUrl", "openApp", "openFolder", "writeNote"].includes(call.name)) {
+                if (!window.electronAPI && SENSITIVE_TOOLS.includes(call.name)) {
                   console.error("Missing electronAPI globally!");
                   resultObj = { error: "CRITICAL FAILURE: The Electron API bridge is disconnected. Tell Shreyas he needs to run the Nami Desktop App (Launch-Nami.bat) rather than the browser web version, otherwise you cannot access his computer." };
                 } else if (call.name === "openUrl" && window.electronAPI) {
@@ -185,6 +251,41 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
                   if (args.fact) {
                     addMemory(args.fact);
                     resultObj = { result: "Memory saved successfully." };
+                  }
+                } else if (call.name === "learnIdentity") {
+                  const args = call.args as { name: string };
+                  const descriptor = this.identityRef?.current?.currentDescriptor;
+                  
+                  if (args.name && descriptor) {
+                    saveUser({
+                      id: crypto.randomUUID(),
+                      name: args.name,
+                      role: "KNOWN",
+                      faceEmbedding: Array.from(descriptor),
+                      createdAt: Date.now(),
+                    });
+                    resultObj = { result: `Identity saved for ${args.name}.` };
+                  } else {
+                    resultObj = { error: "Could not save identity: No face descriptor available right now." };
+                  }
+                } else if (call.name === "grantPermission") {
+                  const args = call.args as { personName: string; durationMinutes: number };
+                  const identity = this.identityRef?.current;
+                  
+                  if (identity?.userRole !== "PRIMARY") {
+                    resultObj = { error: "ONLY the PRIMARY user (Shreyas) can grant permissions." };
+                  } else {
+                    // Find user by name from memory
+                    const allUsers = getAllUsers();
+                    const targetUser = allUsers.find((u: any) => u.name.toLowerCase() === args.personName.toLowerCase());
+                    
+                    if (targetUser) {
+                      const durationMs = (args.durationMinutes || 5) * 60 * 1000;
+                      grantPermission(targetUser.id, durationMs, "FULL");
+                      resultObj = { result: `Granted full access to ${targetUser.name} for ${args.durationMinutes || 5} minutes.` };
+                    } else {
+                      resultObj = { error: `Could not find a known user named ${args.personName}.` };
+                    }
                   }
                 }
 
@@ -239,7 +340,18 @@ You are NOT a submissive AI assistant. You are Shreyas's possessive, jealous, op
     }
     this.streamer.stop();
     this.videoStreamer.stop();
+    this.webcamStreamer.stop();
     this.setState("disconnected");
+  }
+
+  // --- Webcam feed for Nami's vision ---
+
+  startWebcam(videoElement: HTMLVideoElement) {
+    this.webcamStreamer.start(videoElement);
+  }
+
+  stopWebcam() {
+    this.webcamStreamer.stop();
   }
 
   // --- New features: Text Chat & Screen Sharing ---
